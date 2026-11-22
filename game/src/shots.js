@@ -1,79 +1,114 @@
-// The screenshot scenes behind ?shot=start|play|end. Each one plays the real rules forward from a
-// fresh world for a fixed number of steps, steered by a simple autopilot (look ahead each way the
-// paddle could move, keep clear of blocks, chase the lowest coin when that is safe), so the frame
-// is what a short game really looks like and the same seed always gives the same frame.
-import { FIELD, PLAYER, STEP } from './config.js';
-import { EVENT_OVER, KIND_BLOCK } from './world.js';
-import { SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+// Solmar Bay — screenshot presets (?shot=chase|street|mission|steal).
+// Each one stages a real moment of the game — the same code a player runs,
+// just placed mid-action so the screenshots show several systems at once:
+// the city, the HUD with its minimap, traffic, police and a mission.
+import { Car } from './vehicles.js';
 
-const START_SECONDS = 5;
-const PLAY_SECONDS = 26;
-const END_LIMIT_SECONDS = 600;
-/**
- * How far ahead, in seconds, the autopilot checks each way it could move: the play scene's pilot
- * looks well ahead and keeps all its lives; the end scene's looks only a moment ahead, so it is
- * caught out once the blocks speed up, as a hurried player is.
- */
-const HORIZON_PLAY = 0.7;
-const HORIZON_END = 0.25;
-const SAMPLE = 1 / 30;
-const DIRECTIONS = [0, -1, 1];
-/** Extra room, each side, it keeps between the paddle and a block. */
-const MARGIN = 10;
-
-/** Seconds until moving in `direction` (-1, 0, 1) runs the paddle into a block; Infinity when it never does. */
-function timeToHit(state, direction, horizon) {
-  const player = state.player;
-  for (let t = SAMPLE; t <= horizon; t += SAMPLE) {
-    const x = Math.min(FIELD.width - player.width, Math.max(0, player.x + direction * PLAYER.speed * t));
-    for (let index = 0; index < state.items.length; index += 1) {
-      const item = state.items[index];
-      if (!item.active || item.kind !== KIND_BLOCK) continue;
-      const y = item.y + item.speed * t;
-      if (y + item.height > player.y && y < player.y + player.height && item.x < x + player.width + MARGIN && item.x + item.width > x - MARGIN) return t;
-    }
-  }
-  return Infinity;
+function putPlayerInCar(game, kind, color, pos, heading, speed) {
+  const car = new Car(game.gl, kind, color, pos, heading);
+  car.isPlayer = true;
+  car.speed = speed;
+  game.worldCars.push(car);
+  game.player.car = car;
+  game.player.onFoot = false;
+  game.player.pos = [pos[0], 0, pos[2]];
+  return car;
 }
 
-/** Of the safe ways to move, the one toward the lowest coin (or the centre); else the one that is hit last. */
-function autopilot(state, horizon) {
-  const player = state.player;
-  let coin = null;
-  for (let index = 0; index < state.items.length; index += 1) {
-    const item = state.items[index];
-    if (item.active && item.kind !== KIND_BLOCK && (coin === null || item.y > coin.y)) coin = item;
+function spawnPoliceBehind(game, playerPos, heading, n, gap) {
+  for (let i = 0; i < n; i++) {
+    const back = (i + 1) * gap;
+    const bx = playerPos[0] - Math.sin(heading) * back + (i % 2 ? 3.5 : -3.5);
+    const bz = playerPos[2] - Math.cos(heading) * back;
+    const car = new Car(game.gl, 'police', [0.92, 0.92, 0.92], [bx, 0, bz], heading);
+    car.isPolice = true;
+    car.speed = 26;
+    car.targetSpeed = 32;
+    game.police.cars.push(car);
   }
-  const target = coin === null ? FIELD.width / 2 : coin.x + coin.width / 2;
-  const centre = player.x + player.width / 2;
-  const wanted = target > centre + 8 ? 1 : target < centre - 8 ? -1 : 0;
-  let best = wanted;
-  let bestTime = timeToHit(state, wanted, horizon);
-  for (let index = 0; index < DIRECTIONS.length && bestTime !== Infinity; index += 1) {
-    const time = timeToHit(state, DIRECTIONS[index], horizon);
-    if (time > bestTime) {
-      bestTime = time;
-      best = DIRECTIONS[index];
-    }
-  }
-  return best;
 }
 
-/**
- * Set `world` to the named scene (start, play or end; any other name is start) and return the
- * screen to draw over it and the best score to show.
- */
-export function stageShot(name, world) {
-  world.reset();
-  if (name !== 'play' && name !== 'end') {
-    for (let index = 0; index < START_SECONDS / STEP; index += 1) world.step(STEP, 0, true);
-    return { screen: SCREEN_TITLE, best: 0 };
+export function applyShot(game, name) {
+  game.state = 'playing';
+  game.hideOverlays();
+  game.audio.ensure();
+  const g = game;
+  if (name === 'chase') {
+    // Mid-chase on the bayfront avenue: wanted 3, two units behind, the
+    // escape objective live on the HUD.
+    g.timeOfDay = 'sunset';
+    g.missions.startMission(2); // Heat Rising (adds the 3-star heat itself)
+    g.missions.stage = 1; // escape stage
+    const car = putPlayerInCar(g, 'coupe', [0.95, 0.75, 0.2], [0, 0, 60], Math.PI, 30);
+    car.speed = 30;
+    // Units 24 m back so the chase camera (11 m behind the player) sees
+    // them in pursuit instead of one filling the frame.
+    spawnPoliceBehind(g, [0, 0, 60], Math.PI, 2, 24);
+    // And one unit coming the other way in the opposite lane, so the
+    // police are visible ahead in the frame too.
+    const oncoming = new Car(g.gl, 'police', [0.92, 0.92, 0.92], [3.5, 0, -30], 0);
+    oncoming.isPolice = true;
+    oncoming.speed = 26;
+    oncoming.targetSpeed = 30;
+    g.police.cars.push(oncoming);
+    g.camYaw = Math.PI;
+    g.camPitch = 0.32;
+    g.camDist = 11;
+    g.hud.say('Objective: reach Spray & Go to clear your wanted level', 'mission');
+  } else if (name === 'street') {
+    // On foot in the plaza district: traffic, pedestrians, the red coupe
+    // waiting to be stolen, wanted 1.
+    g.timeOfDay = 'sunset';
+    g.missions.startMission(0);
+    // The beacon pillar stands on the coupe itself and would block the
+    // view of it from this angle — hide the 3D pillar for this shot (the
+    // HUD objective and minimap still mark it).
+    g.hideBeacon = true;
+    // Stand on Coral Row (road x=58) looking south down the street at the
+    // red coupe parked ahead by the beach end, garage behind the camera.
+    g.player.pos = [58, 0, 165];
+    g.player.heading = 0;
+    g.wanted.addHeat(20, g.time);
+    g.camYaw = 0;
+    g.camPitch = 0.3;
+    g.camDist = 8;
+    g.hud.setHint('Press E to steal the car');
+  } else if (name === 'mission') {
+    // Bayfront Delivery mid-run: package aboard, timer ticking, the hotel
+    // beacon ahead across town.
+    g.timeOfDay = 'sunset';
+    g.missions.startMission(1);
+    g.missions.stage = 1;
+    g.missions.stageTimer = 18; // 132s left on the 150s clock
+    const car = putPlayerInCar(g, 'sedan', [0.15, 0.35, 0.75], [-140, 0, 170], Math.PI / 2, 22);
+    car.speed = 22;
+    g.camYaw = Math.PI / 2;
+    g.camPitch = 0.32;
+    g.camDist = 12;
+    g.hud.say('Deliver to the Grand Solmar Hotel — 132s left', 'mission');
+  } else if (name === 'steal') {
+    // Dusk: Jax beside the red coupe on Coral Row, one unit rolling in
+    // down the street behind, prompt on screen.
+    g.timeOfDay = 'dusk';
+    g.missions.startMission(0);
+    // Same as the street shot: the beacon pillar would stand on the coupe
+    // itself and split the car in two — hide it here.
+    g.hideBeacon = true;
+    // The coupe parks on road x=58 at z=178; stand on the road's west edge
+    // beside it, facing it. (Never inside the garage building's footprint
+    // — the camera would end up inside the wall.)
+    g.player.pos = [54.5, 0, 176];
+    g.player.heading = 1.05;
+    g.wanted.addHeat(20, g.time);
+    // One police unit on the same road, 28 m north, rolling in.
+    const cop = new Car(g.gl, 'police', [0.92, 0.92, 0.92], [58, 0, 148], 0);
+    cop.isPolice = true;
+    cop.speed = 20;
+    cop.targetSpeed = 26;
+    g.police.cars.push(cop);
+    g.camYaw = 1.05;
+    g.camPitch = 0.35;
+    g.camDist = 6;
+    g.hud.setHint('Press E to steal the car');
   }
-  const limit = name === 'end' ? END_LIMIT_SECONDS : PLAY_SECONDS;
-  const horizon = name === 'end' ? HORIZON_END : HORIZON_PLAY;
-  for (let index = 0; index < limit / STEP; index += 1) {
-    if (world.step(STEP, autopilot(world.state, horizon), false) & EVENT_OVER) break;
-  }
-  const over = world.state.lives === 0;
-  return { screen: over ? SCREEN_OVER : SCREEN_PLAY, best: world.state.score };
 }
